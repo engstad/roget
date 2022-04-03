@@ -1,27 +1,30 @@
-use crate::{Correctness, Guess, Guesser, PackedCorrectness, DICTIONARY, MAX_MASK_ENUM};
+use crate::{Pattern, Guess, Guesser, PackedPattern, Word, DICTIONARY, MAX_MASK_ENUM};
 use once_cell::sync::OnceCell;
 use once_cell::unsync::OnceCell as UnSyncOnceCell;
 use std::borrow::Cow;
 use std::cell::Cell;
 
-/// The initial set of words without any smoothing
-static INITIAL_COUNTS: OnceCell<Vec<(&'static str, f64, usize)>> = OnceCell::new();
-/// The initial set of words after applying sigmoid smoothing.
-static INITIAL_SIGMOID: OnceCell<Vec<(&'static str, f64, usize)>> = OnceCell::new();
+/// The starting word.
+const STARTING_WORD: Word = Word::from(b"tares");
 
-/// A per-thread cache of cached `Correctness` for each word pair.
+/// The initial set of words without any smoothing
+static INITIAL_COUNTS: OnceCell<Vec<(Word, f64, usize)>> = OnceCell::new();
+/// The initial set of words after applying sigmoid smoothing.
+static INITIAL_SIGMOID: OnceCell<Vec<(Word, f64, usize)>> = OnceCell::new();
+
+/// A per-thread cache of cached `Pattern` for each word pair.
 ///
 /// We make this thread-local so that access to it is as cheap as we can get it.
 ///
 /// We store a `Box` because the array is quite large, and we're unlikely to have the stack space
 /// needed to store the whole thing on a given thread's stack.
-type Cache = [[Cell<Option<PackedCorrectness>>; DICTIONARY.len()]; DICTIONARY.len()];
+type Cache = [[Cell<Option<PackedPattern>>; DICTIONARY.len()]; DICTIONARY.len()];
 thread_local! {
     static COMPUTES: UnSyncOnceCell<Box<Cache>> = Default::default();
 }
 
 pub struct Solver {
-    remaining: Cow<'static, Vec<(&'static str, f64, usize)>>,
+    remaining: Cow<'static, Vec<(Word, f64, usize)>>,
     entropy: Vec<f64>,
     options: Options,
     last_guess_idx: Option<usize>,
@@ -178,18 +181,16 @@ impl Options {
 
                 DICTIONARY
                     .iter()
-                    .copied()
                     .enumerate()
-                    .map(|(idx, (word, count))| (word, sigmoid(count as f64 / sum as f64), idx))
+                    .map(|(idx, (word, count))| (Word::new(word), sigmoid(*count as f64 / sum as f64), idx))
                     .collect()
             })
         } else {
             INITIAL_COUNTS.get_or_init(|| {
                 DICTIONARY
                     .iter()
-                    .copied()
                     .enumerate()
-                    .map(|(idx, (word, count))| (word, count as f64, idx))
+                    .map(|(idx, (word, count))| (Word::new(word), *count as f64, idx))
                     .collect()
             })
         };
@@ -208,7 +209,7 @@ impl Options {
 
                     // First, we sanity check that the byte value 0 is equivalent to our `None`
                     // value.
-                    let c = &Cell::new(None::<PackedCorrectness>);
+                    let c = &Cell::new(None::<PackedPattern>);
                     assert_eq!(std::mem::size_of_val(c), 1);
                     let c = c as *const _;
                     let c = c as *const u8;
@@ -246,18 +247,18 @@ impl Options {
 // This inline gives about a 13% speedup.
 #[inline]
 fn get_packed(
-    row: &[Cell<Option<PackedCorrectness>>],
-    guess: &str,
-    answer: &str,
+    row: &[Cell<Option<PackedPattern>>],
+    guess: Word,
+    answer: Word,
     answer_idx: usize,
-) -> PackedCorrectness {
+) -> PackedPattern {
     let cell = &row[answer_idx];
     match cell.get() {
         Some(a) => a,
         None => {
-            let correctness = PackedCorrectness::from(Correctness::compute(answer, guess));
-            cell.set(Some(correctness));
-            correctness
+            let pattern = PackedPattern::from(Pattern::compute(answer, guess));
+            cell.set(Some(pattern));
+            pattern
         }
     }
 }
@@ -269,7 +270,7 @@ impl Solver {
 }
 
 impl Solver {
-    fn trim(&mut self, mut cmp: impl FnMut(&str, usize) -> bool) {
+    fn trim(&mut self, mut cmp: impl FnMut(Word, usize) -> bool) {
         if matches!(self.remaining, Cow::Owned(_)) {
             self.remaining
                 .to_mut()
@@ -278,7 +279,7 @@ impl Solver {
             self.remaining = Cow::Owned(
                 self.remaining
                     .iter()
-                    .filter(|(word, _, word_idx)| cmp(word, *word_idx))
+                    .filter(|(word, _, word_idx)| cmp(*word, *word_idx))
                     .copied()
                     .collect(),
             );
@@ -287,16 +288,16 @@ impl Solver {
 }
 
 impl Guesser for Solver {
-    fn guess(&mut self, history: &[Guess]) -> String {
+    fn guess(&mut self, history: &[Guess]) -> Word {
         let score = history.len() as f64;
 
         if let Some(last) = history.last() {
             if self.options.cache {
-                let reference = PackedCorrectness::from(last.mask);
+                let reference = PackedPattern::from(last.patt);
                 COMPUTES.with(|c| {
                     let row = &c.get().unwrap()[self.last_guess_idx.unwrap()];
                     self.trim(|word, word_idx| {
-                        reference == get_packed(row, &last.word, word, word_idx)
+                        reference == get_packed(row, last.word, word, word_idx)
                     });
                 });
             } else {
@@ -308,17 +309,17 @@ impl Guesser for Solver {
             self.last_guess_idx = Some(
                 self.remaining
                     .iter()
-                    .find(|(word, _, _)| &**word == "tares")
+                    .find(|(word, _, _)| *word == STARTING_WORD)
                     .map(|&(_, _, idx)| idx)
                     .unwrap(),
             );
             // NOTE: I did a manual run with this commented out and it indeed produced "tares" as
             // the first guess. It slows down the run by a lot though.
-            return "tares".to_string();
+            return STARTING_WORD;
         } else if self.options.rank_by == Rank::First || self.remaining.len() == 1 {
             let w = self.remaining.first().unwrap();
             self.last_guess_idx = Some(w.2);
-            return w.0.to_string();
+            return w.0;
         }
         assert!(!self.remaining.is_empty());
 
@@ -345,7 +346,7 @@ impl Guesser for Solver {
         };
         for &(word, count, word_idx) in consider {
             // considering a world where we _did_ guess `word` and got `pattern` as the
-            // correctness. now, compute what _then_ is left.
+            // pattern. now, compute what _then_ is left.
 
             // Rather than iterate over the patterns sequentially and add up the counts of words
             // that result in that pattern, we can instead keep a running total for each pattern
@@ -359,14 +360,14 @@ impl Guesser for Solver {
                     let row = &c.get().unwrap()[word_idx];
                     for (candidate, count, candidate_idx) in &*self.remaining {
                         in_remaining |= word_idx == *candidate_idx;
-                        let idx = get_packed(row, word, candidate, *candidate_idx);
+                        let idx = get_packed(row, word, *candidate, *candidate_idx);
                         totals[usize::from(u8::from(idx))] += count;
                     }
                 });
             } else {
                 for (candidate, count, candidate_idx) in &*self.remaining {
                     in_remaining |= word_idx == *candidate_idx;
-                    let idx = PackedCorrectness::from(Correctness::compute(candidate, word));
+                    let idx = PackedPattern::from(Pattern::compute(*candidate, word));
                     totals[usize::from(u8::from(idx))] += count;
                 }
             }
@@ -425,7 +426,7 @@ impl Guesser for Solver {
         let best = best.unwrap();
         assert_ne!(best.goodness, 0.0);
         self.last_guess_idx = Some(best.idx);
-        best.word.to_string()
+        best.word
     }
 
     fn finish(&self, guesses: usize) {
@@ -444,7 +445,7 @@ impl Guesser for Solver {
 
 #[derive(Debug, Copy, Clone)]
 struct Candidate {
-    word: &'static str,
+    word: Word,
     goodness: f64,
     idx: usize,
 }

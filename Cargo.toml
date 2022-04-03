@@ -9,5 +9,6 @@ edition = "2021"
 debug = true
 
 [dependencies]
+core_simd = { git = "https://github.com/rust-lang/portable-simd" }
 clap = { version = "3", features = ["derive"] }
 once_cell = "1"

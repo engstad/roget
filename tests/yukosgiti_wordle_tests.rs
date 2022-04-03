@@ -1,9 +1,8 @@
-use roget::{Correctness, Guess};
-use std::borrow::Cow;
+use roget::{Pattern, Guess, Correctness, Word};
 
 const TESTS: &str = include_str!("../wordle-tests/data/tests.txt");
 
-fn to_correctness(result: &str) -> [Correctness; 5] {
+fn to_pattern(result: &str) -> Pattern {
     assert_eq!(result.len(), 5);
     let mut out = [Correctness::Wrong; 5];
     for (c, out) in result.bytes().zip(out.iter_mut()) {
@@ -16,7 +15,7 @@ fn to_correctness(result: &str) -> [Correctness; 5] {
             }
         };
     }
-    out
+    Pattern::new(out)
 }
 
 #[test]
@@ -27,18 +26,18 @@ fn all() {
         let guess = fields.next().expect("word2");
         let result = fields.next().expect("result");
         assert_eq!(fields.count(), 0);
-        let result = to_correctness(result);
+        let result = to_pattern(result);
         assert_eq!(
-            Correctness::compute(answer, guess),
+            Pattern::compute(Word::new(answer), Word::new(guess)),
             result,
             "guess {} against {}",
             guess,
             answer
         );
         assert!(Guess {
-            word: Cow::Borrowed(guess),
-            mask: result,
+            word: Word::new(guess),
+            patt: result,
         }
-        .matches(answer));
+        .matches(Word::new(answer)));
     }
 }
